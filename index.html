@@ -8,6 +8,8 @@
 <meta name="theme-color" content="#08080d">
 <title>Money Surge</title>
 <link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
+<meta name="apple-mobile-web-app-title" content="Money Surge">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -539,7 +541,7 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
         <button class="btn btn-red" onclick="resetAll()" style="flex:1">Reset All</button>
       </div>
     </div>
-    <div style="text-align:center;padding:12px;font-size:10px;color:var(--txt3)">Money Surge v4.0 · Auto-refresh 60s</div>
+    <div style="text-align:center;padding:12px;font-size:10px;color:var(--txt3)">Money Surge v4.1 · Auto-refresh 15s</div>
   </div>
 </div>
 
@@ -624,6 +626,7 @@ let volumeHistory = {}; // id -> [{t,v}]
 let catalysts=[], divergences=[], correlationGroups=[], crossPlatformData=[];
 let currentCat='all', currentSearch='', currentSort='score';
 let refreshTimer=null;
+let isRefreshing=false; // debounce flag
 
 // --- Config ---
 const DCFG={minSignal:40,whaleVol:50,probSpike:10,insiderMult:3,arbSpread:5,settledCutoff:3,retention:30,tgToken:'',tgChat:'',polyWallet:'0x553cb39d3f229bfcf451888f5ae7ec6ab8330d4c',polyApiKey:'',polyApiSecret:'',polyApiPass:''};
@@ -666,9 +669,10 @@ document.addEventListener('DOMContentLoaded',()=>{
   updatePortfolioBalance();
 });
 
-// --- Persistence via URL hash ---
+// --- Persistence (localStorage with URL hash migration) ---
 function loadState(){
   try{
+    // Migrate from old URL hash storage
     const h=location.hash;
     if(h&&h.startsWith('#d=')){
       const d=JSON.parse(atob(h.slice(3)));
@@ -677,15 +681,39 @@ function loadState(){
       if(d.pos)positions=d.pos;
       if(d.ph)priceHistory=d.ph;
       if(d.vh)volumeHistory=d.vh;
+      location.hash=''; // clear hash after migration
+      saveState(); // persist to localStorage
+    } else {
+      // Load from localStorage
+      const raw=localStorage.getItem('moneySurge');
+      if(raw){
+        const d=JSON.parse(raw);
+        if(d.cfg)cfg={...DCFG,...d.cfg};
+        if(d.wl)watchlist=new Set(d.wl);
+        if(d.pos)positions=d.pos;
+        if(d.ph)priceHistory=d.ph;
+        if(d.vh)volumeHistory=d.vh;
+      }
     }
-  }catch(e){}
+  }catch(e){console.warn('loadState error',e);}
   applyUI();
 }
+let _saveDebounce=null;
 function saveState(){
-  try{
-    const d={cfg,wl:[...watchlist],pos:positions,ph:priceHistory,vh:volumeHistory};
-    location.hash='d='+btoa(JSON.stringify(d));
-  }catch(e){}
+  // Debounce saves to max once per 2 seconds
+  if(_saveDebounce)return;
+  _saveDebounce=setTimeout(()=>{
+    _saveDebounce=null;
+    try{
+      // Prune history to keep storage lean (last 30 points per market, only active market IDs)
+      const activeIds=new Set(allMarkets.map(m=>m.id));
+      const ph={},vh={};
+      for(const k in priceHistory){if(activeIds.has(k)||positions.some(p=>p.id===k)){ph[k]=(priceHistory[k]||[]).slice(-30);}}
+      for(const k in volumeHistory){if(activeIds.has(k)){vh[k]=(volumeHistory[k]||[]).slice(-30);}}
+      const d={cfg,wl:[...watchlist],pos:positions,ph,vh};
+      localStorage.setItem('moneySurge',JSON.stringify(d));
+    }catch(e){console.warn('saveState error',e);}
+  },2000);
 }
 function applyUI(){
   if(cfg.tgToken)document.getElementById('tgToken').value=cfg.tgToken;
@@ -713,6 +741,8 @@ async function fetchProxy(url){
 }
 
 async function refreshData(){
+  if(isRefreshing)return; // prevent overlapping fetches
+  isRefreshing=true;
   const btn=document.getElementById('refreshBtn');
   document.getElementById('refreshLbl').textContent='...';
   btn.disabled=true;
@@ -745,6 +775,7 @@ async function refreshData(){
   }
   btn.disabled=false;
   document.getElementById('refreshLbl').textContent='Refresh';
+  isRefreshing=false;
 }
 
 // --- Process Market ---
@@ -1425,7 +1456,7 @@ function exportAll(){
   const b=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`money-surge-${new Date().toISOString().slice(0,10)}.json`;a.click();
 }
-function resetAll(){if(confirm('Reset everything?')){location.hash='';location.reload();}}
+function resetAll(){if(confirm('Reset everything?')){localStorage.removeItem('moneySurge');location.hash='';location.reload();}}
 
 
 // =====================================================================
@@ -1720,7 +1751,9 @@ async function syncPolyAccount(){
     return;
   }
   const btn = document.getElementById('syncBtn');
+  const trkBtn = document.getElementById('trackerSyncBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Syncing…'; }
+  if(trkBtn){ trkBtn.disabled = true; trkBtn.textContent = 'Syncing…'; }
   document.getElementById('syncStatus').textContent = 'Fetching positions from Polymarket…';
   try {
     const url = `https://data-api.polymarket.com/positions?user=${cfg.polyWallet}&sizeThreshold=0.1`;
@@ -1771,6 +1804,7 @@ async function syncPolyAccount(){
     document.getElementById('syncStatus').style.color = 'var(--red)';
   }
   if(btn){ btn.disabled = false; btn.textContent = 'Sync Now'; }
+  if(trkBtn){ trkBtn.disabled = false; trkBtn.textContent = '↻ Sync Polymarket'; }
 }
 
 // --- Go to Market (whale bet click) ---
