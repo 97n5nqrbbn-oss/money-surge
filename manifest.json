@@ -1,0 +1,10 @@
+{
+  "name": "Money Surge",
+  "short_name": "MoneySurge",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#0a0a0f",
+  "description": "Prediction market signal tracker with end-date roll-off",
+  "icons": []
+}
