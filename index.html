@@ -127,7 +127,14 @@ input,select,textarea,button{font-family:inherit}
 .sig-badge{font-size:9px;font-weight:600;padding:3px 7px;border-radius:5px}
 
 /* === ALERTS === */
-.alert-card{background:var(--bg-card);border:1px solid var(--border);border-radius:11px;padding:12px;margin:0 16px 8px;display:flex;gap:10px}
+.alert-card{background:var(--bg-card);border:1px solid var(--border);border-radius:11px;padding:12px;margin:0 16px 8px;display:flex;gap:10px;flex-wrap:wrap}
+.whale-expand{display:none;width:100%;padding-top:8px;margin-top:8px;border-top:1px solid var(--border)}
+.whale-expand.open{display:block}
+.whale-expand-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px}
+.whale-expand-row:last-child{border:none}
+.whale-expand-addr{font-size:10px;color:var(--txt3);font-family:'JetBrains Mono',monospace}
+.whale-expand-mkt{font-size:11px;font-weight:500;color:var(--txt)}
+.whale-view-link{display:inline-block;margin-top:8px;font-size:11px;color:var(--accent);text-decoration:underline;text-underline-offset:2px;cursor:pointer}
 .alert-ico{width:32px;height:32px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px}
 .a-whale{background:var(--blue-dim)}.a-spike{background:var(--accent-dim)}.a-ins{background:var(--red-dim)}.a-arb{background:var(--purple-dim)}.a-sent{background:var(--amber-dim)}.a-news{background:var(--green-dim)}
 .alert-body{flex:1}
@@ -1191,7 +1198,20 @@ function generateAlerts(){
   const a=[];
   const t=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
   activeMarkets.forEach(m=>{
-    if(m.vol24h>=cfg.whaleVol*1000&&m.score>=50)a.push({type:'whale',ico:'🐋',cls:'a-whale',t:`Whale Activity: ${trunc(m.question,35)}`,d:`$${fmtN(m.vol24h)} 24h vol · Score ${m.score}`,time:t});
+    if(m.vol24h>=cfg.whaleVol*1000&&m.score>=50){
+      // Find matching whale bets from tracked wallets
+      const mq=m.question.toLowerCase().replace(/[^a-z0-9 ]/g,'');
+      const wBets=[];
+      whaleData.forEach(w=>{
+        w.bets.forEach(b=>{
+          const bq=(b.market||'').toLowerCase().replace(/[^a-z0-9 ]/g,'');
+          if(bq&&mq&&(mq.includes(bq.slice(0,20))||bq.includes(mq.slice(0,20)))){
+            wBets.push({market:b.market,side:b.side,amt:b.amt,entry:b.entry,current:b.current,time:b.time,addr:w.addr,tag:w.tag,tagCls:w.tagCls});
+          }
+        });
+      });
+      a.push({type:'whale',ico:'🐋',cls:'a-whale',t:`Whale Activity: ${trunc(m.question,35)}`,d:`$${fmtN(m.vol24h)} 24h vol · Score ${m.score}`,time:t,question:m.question,displayed:m.displayed,slug:m.slug,vol24h:m.vol24h,dir:m.dir,wBets});
+    }
     if(m.score>=75)a.push({type:'spike',ico:'⚡',cls:'a-spike',t:`High Signal: ${trunc(m.question,35)}`,d:`Score ${m.score} · ${m.dir}`,time:t});
     if(m.insider>=70)a.push({type:'insider',ico:'🔍',cls:'a-ins',t:`Insider Pattern: ${trunc(m.question,35)}`,d:`Insider score ${m.insider}`,time:t});
     if(Math.abs(m.delta)>=cfg.probSpike/100)a.push({type:'delta',ico:'📊',cls:'a-sent',t:`Price Move: ${trunc(m.question,35)}`,d:`${Math.round(m.delta*100)>0?'+':''}${Math.round(m.delta*100)}% shift detected`,time:t});
@@ -1203,7 +1223,52 @@ function generateAlerts(){
   alerts=a.slice(0,40);
   const c=document.getElementById('sub-signals');
   if(!alerts.length){c.innerHTML='<div class="empty"><div class="empty-icon">🔔</div><div class="empty-txt">No signals yet.</div></div>';return;}
-  c.innerHTML=alerts.map(a=>`<div class="alert-card"><div class="alert-ico ${a.cls}">${a.ico}</div><div class="alert-body"><div class="alert-t">${a.t}</div><div class="alert-d">${a.d}</div><div class="alert-time mono">${a.time}</div></div></div>`).join('');
+  c.innerHTML=alerts.map(a=>{
+    if(a.type==='whale'){
+      const yes=a.displayed||50;
+      const no=100-yes;
+      const dirColor=a.dir==='bullish'?'var(--accent)':'var(--red)';
+      // Build whale bets detail rows
+      let betsHtml='';
+      if(a.wBets&&a.wBets.length){
+        betsHtml=a.wBets.map(b=>{
+          const bPnl=b.amt*(b.current/b.entry)-b.amt;
+          const bSign=bPnl>=0?'+':'-';
+          const bColor=bPnl>=0?'var(--accent)':'var(--red)';
+          return`<div class="whale-expand-row">
+            <div style="flex:1;min-width:0">
+              <div class="whale-expand-addr">${b.addr} <span class="whale-tag ${b.tagCls}" style="font-size:8px;padding:1px 4px">${b.tag}</span></div>
+              <div style="font-size:10px;color:var(--txt2);margin-top:1px">${b.entry}¢ → ${b.current}¢ · ${b.time}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+              <span style="color:${b.side==='YES'?'var(--accent)':'var(--red)'};font-weight:700;font-size:11px">${b.side}</span>
+              <span class="mono" style="font-size:11px">$${fmtN(b.amt)}</span>
+              <span class="mono" style="font-size:11px;font-weight:700;color:${bColor}">${bSign}$${fmtN(Math.abs(bPnl))}</span>
+            </div>
+          </div>`;
+        }).join('');
+      } else {
+        betsHtml=`<div style="font-size:11px;color:var(--txt2);padding:4px 0">No tracked wallet bets on this market yet</div>`;
+      }
+      return`<div class="alert-card" style="cursor:pointer" onclick="toggleWhaleExpand(this)">
+        <div class="alert-ico ${a.cls}">${a.ico}</div>
+        <div class="alert-body">
+          <div class="alert-t">${a.t} <span style="color:var(--txt3);font-size:10px;transition:transform 0.2s" class="wchev">▼</span></div>
+          <div class="alert-d">${a.d}</div>
+          <div class="alert-time mono">${a.time}</div>
+        </div>
+        <div class="whale-expand">
+          <div style="display:flex;gap:12px;margin-bottom:6px">
+            <div style="font-size:11px"><span style="color:var(--accent);font-weight:700">YES ${yes}%</span> <span style="color:var(--txt3)">/</span> <span style="color:var(--red);font-weight:700">NO ${no}%</span></div>
+            <div style="font-size:11px;color:${dirColor};font-weight:600">• ${a.dir||'neutral'}</div>
+          </div>
+          ${betsHtml}
+          <span class="whale-view-link" onclick="event.stopPropagation();goToMarket('${(a.question||'').replace(/'/g,'')}')">View on Polymarket →</span>
+        </div>
+      </div>`;
+    }
+    return`<div class="alert-card"><div class="alert-ico ${a.cls}">${a.ico}</div><div class="alert-body"><div class="alert-t">${a.t}</div><div class="alert-d">${a.d}</div><div class="alert-time mono">${a.time}</div></div></div>`;
+  }).join('');
   updateKPIs();
 }
 
@@ -1806,6 +1871,15 @@ async function syncPolyAccount(){
   }
   if(btn){ btn.disabled = false; btn.textContent = 'Sync Now'; }
   if(trkBtn){ trkBtn.disabled = false; trkBtn.textContent = '↻ Sync Polymarket'; }
+}
+
+// --- Toggle whale alert expansion ---
+function toggleWhaleExpand(el){
+  const panel=el.querySelector('.whale-expand');
+  const chev=el.querySelector('.wchev');
+  if(!panel)return;
+  const isOpen=panel.classList.toggle('open');
+  if(chev)chev.style.transform=isOpen?'rotate(180deg)':'';
 }
 
 // --- Go to Market (whale bet click) ---
