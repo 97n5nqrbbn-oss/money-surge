@@ -1093,75 +1093,97 @@ async function fetchWhaleActivity(){
   if(now-lastWhaleFetch<60000&&whaleData.length)return;
   lastWhaleFetch=now;
   try{
-    const url='https://data-api.polymarket.com/trades?limit=500';
-    let data;
+    // Step 1: Fetch REAL whales from the v1 leaderboard (top daily P&L)
+    const lbUrl='https://data-api.polymarket.com/v1/leaderboard?timePeriod=DAY&orderBy=PNL&limit=15';
+    let leaders;
     try{
-      const raw=await fetchProxy(url);
-      data=JSON.parse(raw);
+      const raw=await fetchProxy(lbUrl);
+      leaders=JSON.parse(raw);
     }catch(e){
-      const r=await fetch(url,{signal:AbortSignal.timeout(12000)});
-      data=await r.json();
+      const r=await fetch(lbUrl,{signal:AbortSignal.timeout(12000)});
+      leaders=await r.json();
     }
-    if(!Array.isArray(data)||!data.length)return;
+    if(!Array.isArray(leaders)||!leaders.length)return;
 
-    // Group by wallet
-    const wMap={};
-    data.forEach(t=>{
-      const addr=t.proxyWallet;
-      if(!addr)return;
-      const size=parseFloat(t.size||0);
-      if(!wMap[addr])wMap[addr]={addr,short:addr.slice(0,6)+'...'+addr.slice(-4),name:t.name||t.pseudonym||'',bets:[],totalVol:0,img:t.profileImage||''};
-      const w=wMap[addr];
-      w.totalVol+=size;
-      if(!w.name&&(t.name||t.pseudonym))w.name=t.name||t.pseudonym;
-      if(!w.img&&t.profileImage)w.img=t.profileImage;
-
-      // Determine effective side display
-      const outcome=(t.outcome||'Yes');
-      const isBuy=t.side==='BUY';
-      let sideLabel,sideColor;
-      if(outcome.toLowerCase()==='yes'||outcome.toLowerCase()==='no'){
-        sideLabel=(isBuy?'BUY ':'SELL ')+outcome;
-        sideColor=isBuy?(outcome.toLowerCase()==='yes'?'var(--accent)':'var(--red)'):'var(--amber)';
-      } else {
-        sideLabel=(isBuy?'BUY ':'SELL ')+outcome.slice(0,12);
-        sideColor=isBuy?'var(--accent)':'var(--amber)';
+    // Step 2: For top 10, fetch their recent activity (trades) in parallel
+    const top10=leaders.slice(0,10);
+    const activityResults=await Promise.allSettled(top10.map(async(l)=>{
+      const actUrl=`https://data-api.polymarket.com/activity?user=${l.proxyWallet}&limit=15`;
+      try{
+        const raw=await fetchProxy(actUrl);
+        return{leader:l,activity:JSON.parse(raw)};
+      }catch(e){
+        const r=await fetch(actUrl,{signal:AbortSignal.timeout(12000)});
+        return{leader:l,activity:await r.json()};
       }
-
-      // Find current price from activeMarkets
-      const slug=t.slug||'';
-      const am=activeMarkets.find(m=>m.slug===slug);
-      const curProb=am?am.prob:parseFloat(t.price);
-      const entryCents=Math.round(parseFloat(t.price)*100);
-      const curCents=outcome.toLowerCase()==='yes'?Math.round(curProb*100):outcome.toLowerCase()==='no'?Math.round((1-curProb)*100):entryCents;
-
-      w.bets.push({
-        market:t.title||'Unknown',
-        side:sideLabel,
-        sideColor,
-        amt:size,
-        entry:entryCents,
-        current:curCents,
-        time:timeAgo(parseInt(t.timestamp)),
-        slug:t.eventSlug||t.slug||'',
-        txHash:t.transactionHash||''
-      });
-    });
-
-    // Sort wallets by total volume, top 10
-    const whales=Object.values(wMap).sort((a,b)=>b.totalVol-a.totalVol).slice(0,10);
-
-    whaleData=whales.map(w=>({
-      addr:w.short,
-      fullAddr:w.addr,
-      name:w.name,
-      img:w.img,
-      tag:w.totalVol>=5000?'Whale':w.totalVol>=1000?'Smart Money':'Active',
-      tagCls:w.totalVol>=5000?'whale-known':w.totalVol>=1000?'whale-smart':'whale-fresh',
-      age:'live',
-      totalVol:w.totalVol,
-      bets:w.bets.sort((a,b)=>b.amt-a.amt).slice(0,8)
     }));
+
+    whaleData=activityResults.filter(r=>r.status==='fulfilled').map(r=>{
+      const{leader,activity}=r.value;
+      const addr=leader.proxyWallet;
+      const short=addr.slice(0,6)+'...'+addr.slice(-4);
+      const lbName=leader.userName||'';
+      // Clean up auto-generated names (hex-timestamp pattern)
+      const displayName=(lbName&&!lbName.match(/^0x[0-9a-fA-F]{4,}/i))?lbName:'';
+      const trades=(Array.isArray(activity)?activity:[]).filter(a=>a.type==='TRADE');
+
+      const bets=trades.slice(0,8).map(t=>{
+        const outcome=(t.outcome||'Yes');
+        const isBuy=t.side==='BUY';
+        let sideLabel,sideColor;
+        if(outcome.toLowerCase()==='yes'||outcome.toLowerCase()==='no'){
+          sideLabel=(isBuy?'BUY ':'SELL ')+outcome;
+          sideColor=isBuy?(outcome.toLowerCase()==='yes'?'var(--accent)':'var(--red)'):'var(--amber)';
+        } else {
+          sideLabel=(isBuy?'BUY ':'SELL ')+outcome.slice(0,18);
+          sideColor=isBuy?'var(--accent)':'var(--amber)';
+        }
+        const usdcAmt=parseFloat(t.usdcSize||0)||parseFloat(t.size||0)*parseFloat(t.price||1);
+        const entryCents=Math.round(parseFloat(t.price||0)*100);
+        // Try to find current price from active markets
+        const slug=t.slug||'';
+        const am=activeMarkets.find(m=>m.slug===slug);
+        const curProb=am?am.prob:parseFloat(t.price||0);
+        const curCents=outcome.toLowerCase()==='yes'?Math.round(curProb*100):outcome.toLowerCase()==='no'?Math.round((1-curProb)*100):entryCents;
+        return{
+          market:t.title||'Unknown',
+          side:sideLabel,
+          sideColor,
+          amt:usdcAmt,
+          entry:entryCents,
+          current:curCents,
+          time:timeAgo(parseInt(t.timestamp)),
+          slug:t.eventSlug||t.slug||'',
+          txHash:t.transactionHash||''
+        };
+      });
+
+      const dailyPnl=parseFloat(leader.pnl||0);
+      const dailyVol=parseFloat(leader.vol||0);
+      const rank=parseInt(leader.rank||0);
+      // Tag based on daily P&L magnitude
+      let tag,tagCls;
+      if(dailyPnl>=100000){tag='Mega Whale';tagCls='whale-known';}
+      else if(dailyPnl>=50000){tag='Whale';tagCls='whale-known';}
+      else if(dailyPnl>=10000){tag='Big Fish';tagCls='whale-smart';}
+      else{tag='Top Trader';tagCls='whale-smart';}
+
+      return{
+        addr:short,
+        fullAddr:addr,
+        name:displayName,
+        img:leader.profileImage||'',
+        xUsername:leader.xUsername||'',
+        verified:leader.verifiedBadge||false,
+        tag,tagCls,
+        rank,
+        age:'live',
+        dailyPnl,
+        dailyVol,
+        totalVol:dailyVol,
+        bets
+      };
+    }).filter(w=>w.bets.length>0);
 
     renderWhales();
   }catch(e){
@@ -1173,46 +1195,43 @@ async function fetchWhaleActivity(){
 function renderWhales(){
   const c=document.getElementById('sub-whales');
   if(!whaleData.length){
-    c.innerHTML='<div class="empty"><div class="empty-icon">🐋</div><div class="empty-txt">Loading live whale trades...</div></div>';
+    c.innerHTML='<div class="empty"><div class="empty-icon">🐋</div><div class="empty-txt">Loading live whale trades from leaderboard...</div></div>';
     return;
   }
   const updateTime=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-  c.innerHTML=`<div style="padding:6px 16px;font-size:11px;color:var(--txt2);display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span>🟢 Live trades from Polymarket · Top wallets by volume</span><span class="mono" style="color:var(--txt3);font-size:10px">${updateTime}</span></div>`+
+  c.innerHTML=`<div style="padding:6px 16px;font-size:11px;color:var(--txt2);display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span>🟢 Top Daily P&L Leaderboard · Real whale wallets</span><span class="mono" style="color:var(--txt3);font-size:10px">${updateTime}</span></div>`+
   whaleData.map(w=>{
-    let totalInvested=0,totalValue=0,betCount=w.bets.length;
-    w.bets.forEach(b=>{
-      totalInvested+=b.amt;
-      totalValue+=b.amt*(b.current/Math.max(1,b.entry));
-    });
-    const walletPnl=totalValue-totalInvested;
-    const walletPct=totalInvested>0?((walletPnl/totalInvested)*100):0;
-    const pnlColor=walletPnl>=0?'var(--accent)':'var(--red)';
-    const pnlSign=walletPnl>=0?'+':'';
-    const displayName=w.name?`<span style="color:var(--txt);font-weight:600;font-size:12px">${w.name}</span> <span class="mono" style="font-size:10px;color:var(--txt3)">${w.addr}</span>`:`<span class="whale-addr mono">${w.addr}</span>`;
+    const betCount=w.bets.length;
+    const pnlColor=w.dailyPnl>=0?'var(--accent)':'var(--red)';
+    const pnlSign=w.dailyPnl>=0?'+':'';
+    const xLink=w.xUsername?` <a href="https://x.com/${w.xUsername}" target="_blank" rel="noopener" style="color:var(--txt3);font-size:10px;text-decoration:none">@${w.xUsername}</a>`:'';
+    const verifiedBadge=w.verified?'<span style="color:var(--accent);font-size:10px;margin-left:2px" title="Verified">✓</span>':'';
+    const displayName=w.name?`<span style="color:var(--txt);font-weight:600;font-size:12px">${w.name}</span>${verifiedBadge}${xLink} <span class="mono" style="font-size:10px;color:var(--txt3)">${w.addr}</span>`:`<span class="whale-addr mono">${w.addr}</span>`;
     const profileLink=w.fullAddr?`https://polymarket.com/profile/${w.fullAddr}`:'';
     return`<div class="whale-card">
       <div class="whale-top">
         <div style="display:flex;align-items:center;gap:6px">
-          ${w.img?`<img src="${w.img}" style="width:20px;height:20px;border-radius:50%;object-fit:cover" onerror="this.style.display='none'">`:''}
+          <span style="font-size:11px;font-weight:700;color:var(--amber);min-width:18px">#${w.rank}</span>
+          ${w.img?`<img src="${w.img}" style="width:22px;height:22px;border-radius:50%;object-fit:cover" onerror="this.style.display='none'">`:''}
           ${profileLink?`<a href="${profileLink}" target="_blank" rel="noopener" style="text-decoration:none">${displayName}</a>`:displayName}
         </div>
-        <span class="whale-tag ${w.tagCls}">${w.tag} · $${fmtN(w.totalVol)}</span>
+        <span class="whale-tag ${w.tagCls}">${w.tag}</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding:6px 8px;background:var(--bg-surface);border-radius:7px">
         <div style="display:flex;gap:12px;font-size:11px">
-          <div><span style="color:var(--txt3)">Volume</span><br><span class="mono" style="font-weight:600">$${fmtN(totalInvested)}</span></div>
-          <div><span style="color:var(--txt3)">Est. Value</span><br><span class="mono" style="font-weight:600">$${fmtN(totalValue)}</span></div>
-          <div><span style="color:var(--txt3)">P&L</span><br><span class="mono" style="font-weight:700;color:${pnlColor}">${pnlSign}$${fmtN(Math.abs(walletPnl))}</span></div>
-          <div><span style="color:var(--txt3)">ROI</span><br><span class="mono" style="font-weight:700;color:${pnlColor}">${pnlSign}${walletPct.toFixed(1)}%</span></div>
+          <div><span style="color:var(--txt3)">Daily Vol</span><br><span class="mono" style="font-weight:600">$${fmtN(w.dailyVol)}</span></div>
+          <div><span style="color:var(--txt3)">Daily P&L</span><br><span class="mono" style="font-weight:700;color:${pnlColor}">${pnlSign}$${fmtN(Math.abs(w.dailyPnl))}</span></div>
+          <div><span style="color:var(--txt3)">ROI</span><br><span class="mono" style="font-weight:700;color:${pnlColor}">${pnlSign}${w.dailyVol>0?((w.dailyPnl/w.dailyVol)*100).toFixed(1):'0.0'}%</span></div>
         </div>
-        <div style="font-size:10px;color:var(--txt3);text-align:right"><span style="color:var(--txt2);font-weight:600">${betCount}</span> trades<br><span style="color:var(--accent)">● live</span></div>
+        <div style="font-size:10px;color:var(--txt3);text-align:right"><span style="color:var(--txt2);font-weight:600">${betCount}</span> recent<br><span style="color:var(--accent)">● live</span></div>
       </div>
       <div class="whale-bets">${w.bets.map(b=>{
         const bPnl=b.amt*(b.current/Math.max(1,b.entry))-b.amt;
         const bColor=bPnl>=0?'var(--accent)':'var(--red)';
         const bSign=bPnl>=0?'+':'';
-        const slug=b.slug||'';
-        return`<div class="whale-bet" style="cursor:pointer" onclick="goToMarket('${b.market.replace(/'/g,'')}')">
+        const marketSafe=b.market.replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        const eventUrl=b.slug?`https://polymarket.com/event/${b.slug}`:'';
+        return`<div class="whale-bet" style="cursor:pointer" onclick="${eventUrl?`window.open('${eventUrl}','_blank')`:"goToMarket('"+marketSafe+"')"}">
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent);text-decoration:underline;text-decoration-color:rgba(0,212,170,0.3);text-underline-offset:2px">${b.market}</div>
             <div style="font-size:9px;color:var(--txt3);margin-top:1px">${b.entry}¢ → ${b.current}¢ · ${b.time}${whaleEntryTag(b)}</div>
@@ -1283,18 +1302,20 @@ function generateAlerts(){
   const t=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
   activeMarkets.forEach(m=>{
     if(m.vol24h>=cfg.whaleVol*1000&&m.score>=50){
-      // Find matching whale bets from tracked wallets
+      // Find matching whale bets from REAL leaderboard whales
       const mq=m.question.toLowerCase().replace(/[^a-z0-9 ]/g,'');
       const wBets=[];
       whaleData.forEach(w=>{
         w.bets.forEach(b=>{
           const bq=(b.market||'').toLowerCase().replace(/[^a-z0-9 ]/g,'');
           if(bq&&mq&&(mq.includes(bq.slice(0,20))||bq.includes(mq.slice(0,20)))){
-            wBets.push({market:b.market,side:b.side,amt:b.amt,entry:b.entry,current:b.current,time:b.time,addr:w.addr,tag:w.tag,tagCls:w.tagCls});
+            wBets.push({market:b.market,side:b.side,amt:b.amt,entry:b.entry,current:b.current,time:b.time,addr:w.addr,tag:w.tag,tagCls:w.tagCls,whaleName:w.name||w.addr,dailyPnl:w.dailyPnl});
           }
         });
       });
-      a.push({type:'whale',ico:'🐋',cls:'a-whale',t:`Whale Activity: ${trunc(m.question,35)}`,d:`$${fmtN(m.vol24h)} 24h vol · Score ${m.score}`,time:t,question:m.question,displayed:m.displayed,slug:m.slug,vol24h:m.vol24h,dir:m.dir,wBets});
+      const whaleNames=wBets.map(b=>b.whaleName).filter((v,i,a)=>a.indexOf(v)===i).slice(0,2);
+      const whaleDesc=whaleNames.length?`${whaleNames.join(', ')} trading · `:'';
+      a.push({type:'whale',ico:'🐋',cls:'a-whale',t:`Whale Activity: ${trunc(m.question,35)}`,d:`${whaleDesc}$${fmtN(m.vol24h)} 24h vol · Score ${m.score}`,time:t,question:m.question,displayed:m.displayed,slug:m.slug,vol24h:m.vol24h,dir:m.dir,wBets});
     }
     if(m.score>=75)a.push({type:'spike',ico:'⚡',cls:'a-spike',t:`High Signal: ${trunc(m.question,35)}`,d:`Score ${m.score} · ${m.dir}`,time:t});
     if(m.insider>=70)a.push({type:'insider',ico:'🔍',cls:'a-ins',t:`Insider Pattern: ${trunc(m.question,35)}`,d:`Insider score ${m.insider}`,time:t});
